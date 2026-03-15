@@ -2,14 +2,17 @@
 Scoreboard Feeder — jaettu logiikka
 ====================================
 API-kutsut, SSH-tunneli, tietokanta ja sarjamäärittelyt.
+Tukee usean ottelun seurantaa yhdellä kentällä.
 """
 
 import json
 import os
 import platform
+import re
 import socket
 import subprocess
 import time
+import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -20,7 +23,7 @@ from dotenv import load_dotenv
 # Lataa .env projektin juuresta
 load_dotenv(Path(__file__).parent / ".env")
 
-VERSION = "2.1"
+VERSION = "3.0"
 
 # ─── Asetukset (.env) ────────────────────────────────────────────────────────
 
@@ -40,6 +43,7 @@ SSH_PORT = 22
 
 BASE_URL = "https://spl.torneopal.net/taso/rest"
 
+
 def _build_api_headers() -> dict:
     return {
         "Accept": f"json/{TASO_API_KEY}" if TASO_API_KEY else "application/json",
@@ -54,6 +58,7 @@ def _build_api_headers() -> dict:
             "Chrome/144.0.0.0 Safari/537.36"
         ),
     }
+
 
 SCOREBOARD_URL = "http://www.minormusic.fi/gsoft/scoreboard"
 
@@ -76,11 +81,22 @@ CATEGORIES_2026 = [
     "P161!etejp26", "P162!etejp26", "P16LE!etejp26",
 ]
 
+# ─── Apufunktiot ──────────────────────────────────────────────────────────────
+
+
+def normalize_venue_slug(venue: str) -> str:
+    """Muuntaa kenttänimen URL-turvalliseksi slugiksi.
+    'Oulunkylä TN 1' → 'oulunkyla-tn-1'"""
+    s = unicodedata.normalize("NFKD", venue).encode("ascii", "ignore").decode()
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    return s.strip("-")
+
+
 # ─── SSH-tunneli (valinnainen) ────────────────────────────────────────────────
 
 
 def needs_ssh_tunnel() -> bool:
-    """Tarvitaanko SSH-tunneli? Ei, jos SSH_HOST on tyhjä."""
     return bool(SSH_HOST)
 
 
@@ -110,10 +126,7 @@ def open_ssh_tunnel(local_port: int) -> subprocess.Popen:
     if platform.system() == "Windows":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     return subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **kwargs,
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs,
     )
 
 
@@ -130,14 +143,9 @@ def wait_for_tunnel(local_port: int, timeout: int = 15) -> bool:
 
 def connect_db(host: str = DB_HOST, port: int = DB_PORT) -> pymysql.Connection:
     return pymysql.connect(
-        host=host,
-        port=port,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME,
-        charset="utf8mb4",
-        autocommit=False,
-        connect_timeout=10,
+        host=host, port=port,
+        user=DB_USER, password=DB_PASSWORD, database=DB_NAME,
+        charset="utf8mb4", autocommit=False, connect_timeout=10,
     )
 
 
@@ -163,12 +171,56 @@ def db_upsert(conn, cache_key: str, data, data_type: str,
     conn.commit()
 
 
-def push_match_to_db(conn, match: dict, cat_id: str, league: str):
-    match_id = str(match.get("match_id", ""))
-    db_upsert(conn, f"match_{match_id}",       match,   "match_detail", ttl_hours=3)
-    db_upsert(conn, f"matches_basic_{cat_id}",  [match], "matches", category_id=cat_id, ttl_hours=3)
-    db_upsert(conn, f"league_for_match_{match_id}",
-              {"league_name": league}, "league_meta", ttl_hours=3)
+def push_venue_matches_to_db(conn, venue: str,
+                              matches_with_meta: list[tuple[dict, str, str]]):
+    """Kirjoittaa kaikki kentän ottelut DB:hen.
+    matches_with_meta: [(match_dict, cat_id, league_name), ...]
+    """
+    slug = normalize_venue_slug(venue)
+    now_iso = datetime.now().isoformat(timespec="seconds")
+
+    # Aggregaatti — kaikki ottelut yhdessä rivissä
+    venue_data = {
+        "venue": venue,
+        "date": date.today().strftime("%Y-%m-%d"),
+        "updated_at": now_iso,
+        "matches": [],
+    }
+
+    for match, cat_id, league in matches_with_meta:
+        match_id = str(match.get("match_id", ""))
+
+        # Yksittäinen ottelu
+        db_upsert(conn, f"match_{match_id}", match, "match_detail", ttl_hours=3)
+
+        # Lisää aggregaattiin
+        venue_data["matches"].append({
+            "match_id": match_id,
+            "cat_id": cat_id,
+            "league_name": league,
+            "time": match.get("time", ""),
+            "status": match.get("status", ""),
+            "status_changed_at": match.get("status_changed_at", ""),
+            "team_A_name": match.get("team_A_name", ""),
+            "team_B_name": match.get("team_B_name", ""),
+            "team_A_id": match.get("team_A_id", ""),
+            "team_B_id": match.get("team_B_id", ""),
+            "fs_A": match.get("fs_A"),
+            "fs_B": match.get("fs_B"),
+            "live_timer_on": match.get("live_timer_on"),
+            "live_period": match.get("live_period"),
+            "live_time_mmss": match.get("live_time_mmss"),
+            "period_min": match.get("period_min"),
+            "goals": match.get("goals", []),
+            "club_A_crest": match.get("club_A_crest", ""),
+            "club_B_crest": match.get("club_B_crest", ""),
+            "venue_name": match.get("venue_name", ""),
+        })
+
+    # Järjestä ajan mukaan
+    venue_data["matches"].sort(key=lambda m: m.get("time", ""))
+
+    db_upsert(conn, f"venue_matches_{slug}", venue_data, "venue_matches", ttl_hours=6)
 
 
 # ─── API ──────────────────────────────────────────────────────────────────────
@@ -215,16 +267,25 @@ def parse_cat(cat_id: str) -> tuple[str, str]:
 # ─── Otteluhaku ───────────────────────────────────────────────────────────────
 
 
-def find_todays_match(session: requests.Session, venue: str, team: str,
-                      log_fn=None, stop_check=None):
-    """Käy sarjat läpi ja palauttaa (match, cat_id, league) tai (None, '', '')."""
+def find_todays_venue_matches(session: requests.Session, venue: str,
+                               team: str = "", log_fn=None,
+                               stop_check=None) -> list[tuple[dict, str, str]]:
+    """Hakee KAIKKI tänään kentällä pelattavat ottelut.
+    Palauttaa listan: [(match_dict, cat_id, league_name), ...]
+    Jos team annettu, suodattaa myös joukkueen nimen mukaan.
+    """
     today = date.today().strftime("%Y-%m-%d")
     if log_fn:
-        log_fn(f"Etsitään ottelua {today} | {venue} | {team} ...")
+        filter_str = f"{venue}" + (f" / {team}" if team else "")
+        log_fn(f"Haetaan otteluita {today} | {filter_str} ...")
+
+    found = []
+    seen_ids = set()
+    league_cache = {}  # (comp, cat) -> league_name
 
     for cat_id in CATEGORIES_2026:
         if stop_check and stop_check():
-            return None, "", ""
+            break
 
         cat, comp = parse_cat(cat_id)
         data = api_get(session, "getMatches",
@@ -238,24 +299,46 @@ def find_todays_match(session: requests.Session, venue: str, team: str,
         )
 
         for m in matches:
-            if (
-                m.get("date") == today
-                and venue.lower() in (m.get("venue_name") or "").lower()
-                and team.lower() in (
-                    (m.get("team_A_name") or "") + " " + (m.get("team_B_name") or "")
-                ).lower()
-            ):
-                league = ""
+            mid = str(m.get("match_id", ""))
+            if mid in seen_ids:
+                continue
+
+            if m.get("date") != today:
+                continue
+            if venue.lower() not in (m.get("venue_name") or "").lower():
+                continue
+            if team and team.lower() not in (
+                (m.get("team_A_name") or "") + " " + (m.get("team_B_name") or "")
+            ).lower():
+                continue
+
+            # Hae sarjanimi (cachetetaan per kategoria)
+            cache_key = (comp, cat)
+            if cache_key not in league_cache:
                 cat_info = api_get(session, "getCategory",
                                    {"competition_id": comp, "category_id": cat},
                                    log_fn=log_fn)
                 if cat_info and isinstance(cat_info, dict):
-                    league = (cat_info.get("category") or {}).get("category_name", cat_id)
-                if log_fn:
-                    log_fn(f"Löytyi: {m.get('team_A_name')} vs {m.get('team_B_name')} | {league}")
-                return m, cat_id, league
+                    league_cache[cache_key] = (
+                        (cat_info.get("category") or {}).get("category_name", cat_id)
+                    )
+                else:
+                    league_cache[cache_key] = cat_id
 
-    return None, "", ""
+            league = league_cache[cache_key]
+            seen_ids.add(mid)
+            found.append((m, cat_id, league))
+
+            if log_fn:
+                log_fn(f"  Löytyi: {m.get('team_A_name')} vs {m.get('team_B_name')} | {league}")
+
+    # Järjestä alkuajan mukaan
+    found.sort(key=lambda x: x[0].get("time", ""))
+
+    if log_fn:
+        log_fn(f"Yhteensä {len(found)} ottelua.")
+
+    return found
 
 
 def fetch_live_score(session: requests.Session, match_id: str,
@@ -269,7 +352,9 @@ def fetch_live_score(session: requests.Session, match_id: str,
 
 
 def update_match_from_live(match: dict, live: dict):
-    """Päivittää match-dictiä live-datalla."""
+    """Päivittää match-dictiä live-datalla. Seuraa status-muutoksia."""
+    old_status = (match.get("status") or "").lower()
+
     if live.get("fs_A") is not None:
         match["fs_A"] = live["fs_A"]
         match["fs_B"] = live.get("fs_B")
@@ -277,9 +362,34 @@ def update_match_from_live(match: dict, live: dict):
         match["status"] = live["status"]
     for field in ["live_timer_on", "live_period", "live_time_mmss",
                    "live_A", "live_B", "period_min",
-                   "goals", "team_A_id", "team_B_id"]:
+                   "goals", "team_A_id", "team_B_id",
+                   "club_A_crest", "club_B_crest"]:
         if live.get(field) is not None:
             match[field] = live[field]
+
+    # Seuraa milloin status muuttui
+    new_status = (match.get("status") or "").lower()
+    if new_status != old_status:
+        match["status_changed_at"] = datetime.now().isoformat(timespec="seconds")
+
+
+def is_match_active(match: dict) -> bool:
+    """Onko ottelu live tai alkamassa lähiaikoina?"""
+    status = (match.get("status") or "").lower()
+    if status in ("live", "playing"):
+        return True
+    if status == "played":
+        return False
+    # Tulossa — tarkista onko alkuaika 30 min sisällä
+    match_time = match.get("time", "")
+    if match_time:
+        try:
+            kick = datetime.combine(date.today(),
+                                     datetime.strptime(match_time[:5], "%H:%M").time())
+            return (kick - datetime.now()).total_seconds() < 1800
+        except ValueError:
+            pass
+    return True  # tuntematon status → aktiivinen
 
 
 # ─── Muotoilu ─────────────────────────────────────────────────────────────────
