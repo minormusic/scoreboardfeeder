@@ -10,11 +10,12 @@ import tkinter as tk
 from datetime import date, datetime
 
 from feeder_core import (
-    CATEGORIES_2026,
+    CATEGORIES,
     SCOREBOARD_URL,
     VERSION,
     api_get,
     connect_db,
+    db_upsert,
     find_free_port,
     format_score,
     format_status,
@@ -23,7 +24,6 @@ from feeder_core import (
     needs_ssh_tunnel,
     open_ssh_tunnel,
     parse_cat,
-    push_match_to_db,
     update_match_from_live,
 )
 
@@ -106,7 +106,7 @@ class FeederWorker:
         self._log(f"Etsitään ottelua {today} | {self.venue} | {self.team}…")
 
         match, cat_id, league = None, "", ""
-        for cid in CATEGORIES_2026:
+        for cid in CATEGORIES:
             if self._stop.is_set():
                 return
             cat, comp = parse_cat(cid)
@@ -166,7 +166,8 @@ class FeederWorker:
             last_score = score
 
             try:
-                push_match_to_db(self.conn, match, cat_id, league)
+                match_id = str(match.get("match_id", ""))
+                db_upsert(self.conn, f"match_{match_id}", match, "match_detail", ttl_hours=3)
                 db_ok = "ok"
             except Exception:
                 db_ok = "virhe"

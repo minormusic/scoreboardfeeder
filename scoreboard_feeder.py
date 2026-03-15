@@ -40,10 +40,9 @@ DISCOVERY_INTERVAL = 600   # 10 min
 IDLE_SLEEP = 300           # 5 min kun kaikki pelattu
 
 
-def log(msg: str, daemon: bool = False):
+def log(msg: str):
     ts = datetime.now().strftime("%H:%M:%S")
-    line = f"  [{ts}] {msg}"
-    print(line, flush=True)
+    print(f"  [{ts}] {msg}", flush=True)
 
 
 def write_pid(path: str):
@@ -141,18 +140,17 @@ def main():
 
     # Pääsilmukka
     last_discovery = time.time()
+    _shutdown = False
 
     def graceful_exit(sig, frame):
+        nonlocal _shutdown
         log("Signaali vastaanotettu, lopetetaan.")
-        conn.close()
-        if tunnel_proc:
-            tunnel_proc.terminate()
-        sys.exit(0)
+        _shutdown = True
 
     signal.signal(signal.SIGTERM, graceful_exit)
 
     try:
-        while True:
+        while not _shutdown:
             # Re-discovery 10 min välein
             if time.time() - last_discovery > DISCOVERY_INTERVAL:
                 log("Re-discovery...")
@@ -173,11 +171,9 @@ def main():
                 last_discovery = time.time()
 
             # Pollaa aktiiviset ottelut
-            any_active = False
             for match, cat_id, league in matches_meta:
                 if not is_match_active(match):
                     continue
-                any_active = True
                 match_id = str(match.get("match_id", ""))
                 live = fetch_live_score(session, match_id, log_fn=log)
                 if live:

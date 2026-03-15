@@ -20,6 +20,8 @@ rsync -avz --delete \
     --exclude='.claude/' \
     --exclude='scoreboard/' \
     --exclude='deploy.sh' \
+    --exclude='feeder.pid' \
+    --exclude='feeder.log' \
     ./ "$REMOTE:$FEEDER_DIR/"
 
 # 2. Scoreboard → ~/public_html/gsoft/scoreboard/

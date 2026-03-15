@@ -372,6 +372,25 @@ function render(data) {
     currentMatchId = newId;
 }
 
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+}
+
+function makeCrest(url) {
+    if (!url) {
+        const d = document.createElement('div');
+        d.className = 'crest-placeholder';
+        return d;
+    }
+    const img = document.createElement('img');
+    img.className = 'crest';
+    img.src = url;
+    img.onerror = function() { this.className = 'crest-placeholder'; this.removeAttribute('src'); };
+    return img;
+}
+
 function renderMatch(m) {
     const sb = document.getElementById('sb');
     const status = (m.status || '').toLowerCase();
@@ -387,52 +406,101 @@ function renderMatch(m) {
     lastScoreA = scoreA;
     lastScoreB = scoreB;
 
-    // Maalit
-    const goalsA = formatGoals(m.goals || [], m.team_A_id);
-    const goalsB = formatGoals(m.goals || [], m.team_B_id);
-
-    // Logo
-    const logoA = m.club_A_crest
-        ? `<img class="crest" src="${m.club_A_crest}" onerror="this.className='crest-placeholder'">`
-        : '<div class="crest-placeholder"></div>';
-    const logoB = m.club_B_crest
-        ? `<img class="crest" src="${m.club_B_crest}" onerror="this.className='crest-placeholder'">`
-        : '<div class="crest-placeholder"></div>';
+    // Maalit (escapettu)
+    const goalsA = esc(formatGoals(m.goals || [], m.team_A_id));
+    const goalsB = esc(formatGoals(m.goals || [], m.team_B_id));
 
     // Status teksti
-    let statusHtml;
+    let statusText;
     if (isLive) {
-        statusHtml = `<div class="live-dot"></div><span class="status-text" id="clock"></span>`;
+        statusText = null; // kello asetetaan erikseen
     } else if (isPlayed) {
-        statusHtml = `<span class="status-text">LOPPU</span>`;
+        statusText = 'LOPPU';
     } else {
         const t = (m.time || '').substring(0, 5);
-        statusHtml = `<span class="status-text">${t || 'TULOSSA'}</span>`;
+        statusText = t || 'TULOSSA';
     }
 
-    sb.innerHTML = `
-        <div class="league">${m.league_name || ''}</div>
-        <div class="team team-home">
-            <div class="team-col">
-                <div class="team-name">${m.team_A_name || ''}</div>
-                <div class="goals">${goalsA}</div>
-            </div>
-            ${logoA}
-        </div>
-        <div class="score-box">
-            <span class="score ${flashA ? 'flash' : ''}" id="score-a">${scoreA}</span>
-            <span class="score-separator">:</span>
-            <span class="score ${flashB ? 'flash' : ''}" id="score-b">${scoreB}</span>
-        </div>
-        <div class="team team-away">
-            ${logoB}
-            <div class="team-col away">
-                <div class="team-name">${m.team_B_name || ''}</div>
-                <div class="goals">${goalsB}</div>
-            </div>
-        </div>
-        <div class="status-box">${statusHtml}</div>
-    `;
+    // Rakennetaan DOM turvallisesti (ei innerHTML datalle)
+    sb.innerHTML = '';
+
+    // League
+    const leagueEl = document.createElement('div');
+    leagueEl.className = 'league';
+    leagueEl.textContent = m.league_name || '';
+    sb.appendChild(leagueEl);
+
+    // Home team
+    const homeTeam = document.createElement('div');
+    homeTeam.className = 'team team-home';
+    const homeCol = document.createElement('div');
+    homeCol.className = 'team-col';
+    const homeName = document.createElement('div');
+    homeName.className = 'team-name';
+    homeName.textContent = m.team_A_name || '';
+    const homeGoals = document.createElement('div');
+    homeGoals.className = 'goals';
+    homeGoals.textContent = formatGoals(m.goals || [], m.team_A_id);
+    homeCol.appendChild(homeName);
+    homeCol.appendChild(homeGoals);
+    homeTeam.appendChild(homeCol);
+    homeTeam.appendChild(makeCrest(m.club_A_crest));
+    sb.appendChild(homeTeam);
+
+    // Score box
+    const scoreBox = document.createElement('div');
+    scoreBox.className = 'score-box';
+    const scoreAEl = document.createElement('span');
+    scoreAEl.className = 'score' + (flashA ? ' flash' : '');
+    scoreAEl.id = 'score-a';
+    scoreAEl.textContent = scoreA;
+    const sep = document.createElement('span');
+    sep.className = 'score-separator';
+    sep.textContent = ':';
+    const scoreBEl = document.createElement('span');
+    scoreBEl.className = 'score' + (flashB ? ' flash' : '');
+    scoreBEl.id = 'score-b';
+    scoreBEl.textContent = scoreB;
+    scoreBox.appendChild(scoreAEl);
+    scoreBox.appendChild(sep);
+    scoreBox.appendChild(scoreBEl);
+    sb.appendChild(scoreBox);
+
+    // Away team
+    const awayTeam = document.createElement('div');
+    awayTeam.className = 'team team-away';
+    awayTeam.appendChild(makeCrest(m.club_B_crest));
+    const awayCol = document.createElement('div');
+    awayCol.className = 'team-col away';
+    const awayName = document.createElement('div');
+    awayName.className = 'team-name';
+    awayName.textContent = m.team_B_name || '';
+    const awayGoals = document.createElement('div');
+    awayGoals.className = 'goals';
+    awayGoals.textContent = formatGoals(m.goals || [], m.team_B_id);
+    awayCol.appendChild(awayName);
+    awayCol.appendChild(awayGoals);
+    awayTeam.appendChild(awayCol);
+    sb.appendChild(awayTeam);
+
+    // Status box
+    const statusBox = document.createElement('div');
+    statusBox.className = 'status-box';
+    if (isLive) {
+        const dot = document.createElement('div');
+        dot.className = 'live-dot';
+        statusBox.appendChild(dot);
+        const clock = document.createElement('span');
+        clock.className = 'status-text';
+        clock.id = 'clock';
+        statusBox.appendChild(clock);
+    } else {
+        const st = document.createElement('span');
+        st.className = 'status-text';
+        st.textContent = statusText;
+        statusBox.appendChild(st);
+    }
+    sb.appendChild(statusBox);
 
     // Flash-efekti poisto
     if (flashA || flashB) {

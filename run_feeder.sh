@@ -19,4 +19,3 @@ rm -f "$PIDFILE"
 source "$VENV"
 cd "$BASEDIR"
 nohup python scoreboard_feeder.py --venue "Oulunkylä" --daemon --pidfile "$PIDFILE" >> "$LOGFILE" 2>&1 &
-echo $! > "$PIDFILE"

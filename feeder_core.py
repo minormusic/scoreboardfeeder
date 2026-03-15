@@ -11,6 +11,7 @@ import platform
 import re
 import socket
 import subprocess
+import threading
 import time
 import unicodedata
 from datetime import date, datetime, timedelta
@@ -62,24 +63,40 @@ def _build_api_headers() -> dict:
 
 SCOREBOARD_URL = "http://www.minormusic.fi/gsoft/scoreboard"
 
-# ─── Sarjat 2026 ─────────────────────────────────────────────────────────────
+# ─── Sarjat (automaattinen kausi vuoden perusteella) ──────────────────────────
 
-CATEGORIES_2026 = [
-    # SPL valtakunnalliset (spljp26)
-    "MSC!spljp26",    "NSC!spljp26",    "KC!spljp26",
-    "VL!spljp26",     "NL!spljp26",     "M1L!spljp26",
-    "M1!spljp26",     "N1!spljp26",     "M2!spljp26",     "N2!spljp26",
-    "P21SM!spljp26",  "P211!spljp26",
-    "P18SM!spljp26",  "P18SMK!spljp26", "P181!spljp26",
-    "T18SM!spljp26",  "T18SMK!spljp26", "T181!spljp26",
-    # Etelä alue (etejp26)
-    "M3!etejp26",
-    "P121!etejp26", "P122!etejp26", "P12LE!etejp26",
-    "P131!etejp26", "P132!etejp26", "P13LE!etejp26",
-    "P141!etejp26", "P142!etejp26", "P14LE!etejp26",
-    "P151!etejp26", "P152!etejp26", "P15LE!etejp26",
-    "P161!etejp26", "P162!etejp26", "P16LE!etejp26",
-]
+
+def _current_season_suffix() -> str:
+    """Palauttaa kauden tunnuksen: 'jp' + vuoden kaksi viimeistä numeroa.
+    Esim. 2026 → 'jp26', 2027 → 'jp27'."""
+    return f"jp{date.today().year % 100:02d}"
+
+
+def _build_categories() -> list[str]:
+    """Rakentaa sarjalistan automaattisesti kulloisellekin kaudelle."""
+    s = _current_season_suffix()
+    spl = f"spl{s}"
+    ete = f"ete{s}"
+
+    return [
+        # SPL valtakunnalliset
+        f"MSC!{spl}",    f"NSC!{spl}",    f"KC!{spl}",
+        f"VL!{spl}",     f"NL!{spl}",     f"M1L!{spl}",
+        f"M1!{spl}",     f"N1!{spl}",     f"M2!{spl}",     f"N2!{spl}",
+        f"P21SM!{spl}",  f"P211!{spl}",
+        f"P18SM!{spl}",  f"P18SMK!{spl}", f"P181!{spl}",
+        f"T18SM!{spl}",  f"T18SMK!{spl}", f"T181!{spl}",
+        # Etelä alue
+        f"M3!{ete}",
+        f"P121!{ete}", f"P122!{ete}", f"P12LE!{ete}",
+        f"P131!{ete}", f"P132!{ete}", f"P13LE!{ete}",
+        f"P141!{ete}", f"P142!{ete}", f"P14LE!{ete}",
+        f"P151!{ete}", f"P152!{ete}", f"P15LE!{ete}",
+        f"P161!{ete}", f"P162!{ete}", f"P16LE!{ete}",
+    ]
+
+
+CATEGORIES = _build_categories()
 
 # ─── Apufunktiot ──────────────────────────────────────────────────────────────
 
@@ -150,7 +167,9 @@ def connect_db(host: str = DB_HOST, port: int = DB_PORT) -> pymysql.Connection:
 
 
 def db_upsert(conn, cache_key: str, data, data_type: str,
-              category_id: str | None = None, ttl_hours: int = 3):
+              category_id: str | None = None, ttl_hours: int = 3,
+              auto_commit: bool = True):
+    season = str(date.today().year)
     json_str = json.dumps(data, ensure_ascii=False)
     expires_at = datetime.now() + timedelta(hours=ttl_hours)
     with conn.cursor() as cur:
@@ -166,9 +185,10 @@ def db_upsert(conn, cache_key: str, data, data_type: str,
                 expires_at    = VALUES(expires_at),
                 is_historical = 0
             """,
-            (cache_key, data_type, category_id, "2026", json_str, expires_at),
+            (cache_key, data_type, category_id, season, json_str, expires_at),
         )
-    conn.commit()
+    if auto_commit:
+        conn.commit()
 
 
 def push_venue_matches_to_db(conn, venue: str,
@@ -191,7 +211,8 @@ def push_venue_matches_to_db(conn, venue: str,
         match_id = str(match.get("match_id", ""))
 
         # Yksittäinen ottelu
-        db_upsert(conn, f"match_{match_id}", match, "match_detail", ttl_hours=3)
+        db_upsert(conn, f"match_{match_id}", match, "match_detail",
+                  ttl_hours=3, auto_commit=False)
 
         # Lisää aggregaattiin
         venue_data["matches"].append({
@@ -220,12 +241,15 @@ def push_venue_matches_to_db(conn, venue: str,
     # Järjestä ajan mukaan
     venue_data["matches"].sort(key=lambda m: m.get("time", ""))
 
-    db_upsert(conn, f"venue_matches_{slug}", venue_data, "venue_matches", ttl_hours=6)
+    db_upsert(conn, f"venue_matches_{slug}", venue_data, "venue_matches",
+              ttl_hours=6, auto_commit=False)
+    conn.commit()
 
 
 # ─── API ──────────────────────────────────────────────────────────────────────
 
 _last_api_call = 0.0
+_api_lock = threading.Lock()
 
 
 def make_session() -> requests.Session:
@@ -242,19 +266,20 @@ def make_session() -> requests.Session:
 def api_get(session: requests.Session, endpoint: str, params: dict,
             log_fn=None) -> dict | None:
     global _last_api_call
-    elapsed = time.time() - _last_api_call
-    if elapsed < 0.6:
-        time.sleep(0.6 - elapsed)
-    try:
-        r = session.get(f"{BASE_URL}/{endpoint}", params=params, timeout=15)
-        _last_api_call = time.time()
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        _last_api_call = time.time()
-        if log_fn:
-            log_fn(f"API-virhe ({endpoint}): {e}")
-        return None
+    with _api_lock:
+        elapsed = time.time() - _last_api_call
+        if elapsed < 0.6:
+            time.sleep(0.6 - elapsed)
+        try:
+            r = session.get(f"{BASE_URL}/{endpoint}", params=params, timeout=15)
+            _last_api_call = time.time()
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            _last_api_call = time.time()
+            if log_fn:
+                log_fn(f"API-virhe ({endpoint}): {e}")
+            return None
 
 
 def parse_cat(cat_id: str) -> tuple[str, str]:
@@ -283,7 +308,7 @@ def find_todays_venue_matches(session: requests.Session, venue: str,
     seen_ids = set()
     league_cache = {}  # (comp, cat) -> league_name
 
-    for cat_id in CATEGORIES_2026:
+    for cat_id in CATEGORIES:
         if stop_check and stop_check():
             break
 
