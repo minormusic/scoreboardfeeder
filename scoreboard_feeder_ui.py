@@ -9,10 +9,7 @@ import time
 import tkinter as tk
 from datetime import date, datetime
 
-import requests
-
 from feeder_core import (
-    API_HEADERS,
     CATEGORIES_2026,
     SCOREBOARD_URL,
     VERSION,
@@ -22,6 +19,8 @@ from feeder_core import (
     format_score,
     format_status,
     is_port_open,
+    make_session,
+    needs_ssh_tunnel,
     open_ssh_tunnel,
     parse_cat,
     push_match_to_db,
@@ -68,39 +67,40 @@ class FeederWorker:
     def _run(self):
         self.on_status("searching")
 
-        # SSH-tunneli
-        port = find_free_port()
-        self._log(f"Avataan SSH-tunneli (portti {port})…")
-        self.tunnel_proc = open_ssh_tunnel(port)
-        for _ in range(15):
-            if self._stop.is_set():
+        # DB-yhteys — SSH-tunneli vain tarvittaessa
+        if needs_ssh_tunnel():
+            port = find_free_port()
+            self._log(f"Avataan SSH-tunneli (portti {port})…")
+            self.tunnel_proc = open_ssh_tunnel(port)
+            for _ in range(15):
+                if self._stop.is_set():
+                    return
+                time.sleep(1)
+                if is_port_open(port):
+                    break
+            else:
+                self._log("VIRHE: SSH-tunneli ei auennut.")
+                self.on_status("error")
                 return
-            time.sleep(1)
-            if is_port_open(port):
-                break
+            self._log("SSH-tunneli auki.")
+            db_host, db_port = "127.0.0.1", port
         else:
-            self._log("VIRHE: SSH-tunneli ei auennut.")
-            self.on_status("error")
-            return
-        self._log("SSH-tunneli auki.")
+            self._log("Suora MySQL-yhteys (palvelin).")
+            db_host, db_port = None, None
 
         # MySQL
         try:
-            self.conn = connect_db(port)
+            self.conn = connect_db(db_host, db_port) if db_host else connect_db()
             self._log("MySQL-yhteys OK.")
         except Exception as e:
             self._log(f"VIRHE MySQL: {e}")
             self.on_status("error")
-            self.tunnel_proc.terminate()
+            if self.tunnel_proc:
+                self.tunnel_proc.terminate()
             return
 
         # Etsi ottelu
-        session = requests.Session()
-        session.headers.update(API_HEADERS)
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=5, pool_maxsize=10, max_retries=2,
-        )
-        session.mount("https://", adapter)
+        session = make_session()
 
         today = date.today().strftime("%Y-%m-%d")
         self._log(f"Etsitään ottelua {today} | {self.venue} | {self.team}…")
@@ -138,7 +138,8 @@ class FeederWorker:
             self._log("Tänään ei ottelua näillä hakuehdoilla.")
             self.on_status("error")
             self.conn.close()
-            self.tunnel_proc.terminate()
+            if self.tunnel_proc:
+                self.tunnel_proc.terminate()
             return
 
         home = match.get("team_A_name", "?")
@@ -186,7 +187,8 @@ class FeederWorker:
                 time.sleep(1)
 
         self.conn.close()
-        self.tunnel_proc.terminate()
+        if self.tunnel_proc:
+            self.tunnel_proc.terminate()
         self._log("Pysäytetty.")
 
 

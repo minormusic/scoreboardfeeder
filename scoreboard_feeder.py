@@ -2,8 +2,8 @@
 """
 Gnistan Scoreboard Feeder — CLI
 ================================
-Hakee tänään pelattavan ottelun tuloksen torneopal.netistä
-ja syöttää sen Louhen MySQL-cacheen.
+Hakee tänään pelattavan ottelun tuloksen Taso API:sta
+ja syöttää sen MySQL-cacheen.
 
 Käyttö:
     python scoreboard_feeder.py
@@ -25,6 +25,7 @@ from feeder_core import (
     format_score,
     format_status,
     make_session,
+    needs_ssh_tunnel,
     open_ssh_tunnel,
     push_match_to_db,
     update_match_from_live,
@@ -53,27 +54,30 @@ def main():
     print(f"  Päivitys : {args.interval}s")
     print()
 
-    # SSH-tunneli
-    local_port = find_free_port()
-    log(f"Avataan SSH-tunneli (paikallinen portti {local_port})...")
-    tunnel_proc = open_ssh_tunnel(local_port)
+    # DB-yhteys — SSH-tunneli vain tarvittaessa (lokaali kehitys)
+    tunnel_proc = None
+    if needs_ssh_tunnel():
+        local_port = find_free_port()
+        log(f"Avataan SSH-tunneli (portti {local_port})...")
+        tunnel_proc = open_ssh_tunnel(local_port)
+        if not wait_for_tunnel(local_port):
+            print("\n  VIRHE: SSH-tunneli ei auennut 15 sekunnissa.")
+            tunnel_proc.terminate()
+            sys.exit(1)
+        log("SSH-tunneli auki.")
+        db_host, db_port = "127.0.0.1", local_port
+    else:
+        log("Suora MySQL-yhteys (palvelin).")
+        db_host, db_port = None, None  # käyttää .env oletuksia
 
-    if not wait_for_tunnel(local_port):
-        print("\n  VIRHE: SSH-tunneli ei auennut 15 sekunnissa.")
-        print("  Tarkista SSH-avain ja yhteys.")
-        tunnel_proc.terminate()
-        sys.exit(1)
-
-    log(f"Tunneli auki: 127.0.0.1:{local_port}")
-
-    # MySQL
     log("Yhdistetään MySQL:ään...")
     try:
-        conn = connect_db(local_port)
+        conn = connect_db(db_host, db_port) if db_host else connect_db()
         log("MySQL-yhteys OK.")
     except Exception as e:
         print(f"\n  VIRHE: MySQL-yhteys epäonnistui: {e}")
-        tunnel_proc.terminate()
+        if tunnel_proc:
+            tunnel_proc.terminate()
         sys.exit(1)
 
     print()
@@ -89,7 +93,8 @@ def main():
         print(f"     Kenttä  : {args.venue}")
         print(f"     Joukkue : {args.team}")
         conn.close()
-        tunnel_proc.terminate()
+        if tunnel_proc:
+            tunnel_proc.terminate()
         sys.exit(0)
 
     match_id = str(match["match_id"])
@@ -151,7 +156,8 @@ def main():
 
     finally:
         conn.close()
-        tunnel_proc.terminate()
+        if tunnel_proc:
+            tunnel_proc.terminate()
         log("Yhteydet suljettu.")
 
 

@@ -20,35 +20,40 @@ from dotenv import load_dotenv
 # Lataa .env projektin juuresta
 load_dotenv(Path(__file__).parent / ".env")
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 # ─── Asetukset (.env) ────────────────────────────────────────────────────────
 
-SSH_HOST = os.environ.get("SSH_HOST", "whm57.louhi.net")
-SSH_USER = os.environ.get("SSH_USER", "minormusic")
-SSH_PORT = 22
+TASO_API_KEY = os.environ.get("TASO_API_KEY", "")
 
+DB_HOST     = os.environ.get("DB_HOST", "localhost")
+DB_PORT     = int(os.environ.get("DB_PORT", "3306"))
 DB_USER     = os.environ.get("DB_USER", "")
 DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 DB_NAME     = os.environ.get("DB_NAME", "")
+
+SSH_HOST = os.environ.get("SSH_HOST", "")
+SSH_USER = os.environ.get("SSH_USER", "")
+SSH_PORT = 22
 
 # ─── API-asetukset ───────────────────────────────────────────────────────────
 
 BASE_URL = "https://spl.torneopal.net/taso/rest"
 
-API_HEADERS = {
-    "Accept": "json/n9tnjq45uuccbe8nbfy6q7ggmreqntvs",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Accept-Language": "en-US,en;q=0.9,fi;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Referer": "https://tulospalvelu.palloliitto.fi/",
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/144.0.0.0 Safari/537.36"
-    ),
-}
+def _build_api_headers() -> dict:
+    return {
+        "Accept": f"json/{TASO_API_KEY}" if TASO_API_KEY else "application/json",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "en-US,en;q=0.9,fi;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://tulospalvelu.palloliitto.fi/",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/144.0.0.0 Safari/537.36"
+        ),
+    }
 
 SCOREBOARD_URL = "http://www.minormusic.fi/gsoft/scoreboard"
 
@@ -71,7 +76,12 @@ CATEGORIES_2026 = [
     "P161!etejp26", "P162!etejp26", "P16LE!etejp26",
 ]
 
-# ─── SSH-tunneli ──────────────────────────────────────────────────────────────
+# ─── SSH-tunneli (valinnainen) ────────────────────────────────────────────────
+
+
+def needs_ssh_tunnel() -> bool:
+    """Tarvitaanko SSH-tunneli? Ei, jos SSH_HOST on tyhjä."""
+    return bool(SSH_HOST)
 
 
 def find_free_port() -> int:
@@ -118,10 +128,10 @@ def wait_for_tunnel(local_port: int, timeout: int = 15) -> bool:
 # ─── MySQL ────────────────────────────────────────────────────────────────────
 
 
-def connect_db(local_port: int) -> pymysql.Connection:
+def connect_db(host: str = DB_HOST, port: int = DB_PORT) -> pymysql.Connection:
     return pymysql.connect(
-        host="127.0.0.1",
-        port=local_port,
+        host=host,
+        port=port,
         user=DB_USER,
         password=DB_PASSWORD,
         database=DB_NAME,
@@ -168,7 +178,7 @@ _last_api_call = 0.0
 
 def make_session() -> requests.Session:
     session = requests.Session()
-    session.headers.update(API_HEADERS)
+    session.headers.update(_build_api_headers())
     adapter = requests.adapters.HTTPAdapter(
         pool_connections=5, pool_maxsize=10, max_retries=2,
     )
@@ -285,6 +295,6 @@ def format_status(match: dict) -> str:
     if s == "played":
         return "LOPPU"
     if s in ("live", "playing"):
-        return "● LIVE"
+        return "LIVE"
     t = (match.get("time") or "")[:5]
     return t or "TULOSSA"
