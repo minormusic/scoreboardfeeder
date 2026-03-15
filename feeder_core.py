@@ -63,40 +63,10 @@ def _build_api_headers() -> dict:
 
 SCOREBOARD_URL = "http://www.minormusic.fi/gsoft/scoreboard"
 
-# ─── Sarjat (automaattinen kausi vuoden perusteella) ──────────────────────────
+# ─── Kenttä (venue_id) ────────────────────────────────────────────────────────
 
-
-def _current_season_suffix() -> str:
-    """Palauttaa kauden tunnuksen: 'jp' + vuoden kaksi viimeistä numeroa.
-    Esim. 2026 → 'jp26', 2027 → 'jp27'."""
-    return f"jp{date.today().year % 100:02d}"
-
-
-def _build_categories() -> list[str]:
-    """Rakentaa sarjalistan automaattisesti kulloisellekin kaudelle."""
-    s = _current_season_suffix()
-    spl = f"spl{s}"
-    ete = f"ete{s}"
-
-    return [
-        # SPL valtakunnalliset
-        f"MSC!{spl}",    f"NSC!{spl}",    f"KC!{spl}",
-        f"VL!{spl}",     f"NL!{spl}",     f"M1L!{spl}",
-        f"M1!{spl}",     f"N1!{spl}",     f"M2!{spl}",     f"N2!{spl}",
-        f"P21SM!{spl}",  f"P211!{spl}",
-        f"P18SM!{spl}",  f"P18SMK!{spl}", f"P181!{spl}",
-        f"T18SM!{spl}",  f"T18SMK!{spl}", f"T181!{spl}",
-        # Etelä alue
-        f"M3!{ete}",
-        f"P121!{ete}", f"P122!{ete}", f"P12LE!{ete}",
-        f"P131!{ete}", f"P132!{ete}", f"P13LE!{ete}",
-        f"P141!{ete}", f"P142!{ete}", f"P14LE!{ete}",
-        f"P151!{ete}", f"P152!{ete}", f"P15LE!{ete}",
-        f"P161!{ete}", f"P162!{ete}", f"P16LE!{ete}",
-    ]
-
-
-CATEGORIES = _build_categories()
+# Oulunkylä 1 TN = venue_id 325 (Taso API getVenues)
+VENUE_ID = os.environ.get("VENUE_ID", "325")
 
 # ─── Apufunktiot ──────────────────────────────────────────────────────────────
 
@@ -266,12 +236,17 @@ def make_session() -> requests.Session:
 def api_get(session: requests.Session, endpoint: str, params: dict,
             log_fn=None) -> dict | None:
     global _last_api_call
+    # Laske odotusaika lockin alla, mutta nuku sen ulkopuolella
     with _api_lock:
-        elapsed = time.time() - _last_api_call
-        if elapsed < 0.6:
-            time.sleep(0.6 - elapsed)
+        wait = max(0, 0.6 - (time.time() - _last_api_call))
+    if wait > 0:
+        time.sleep(wait)
+    with _api_lock:
         try:
-            r = session.get(f"{BASE_URL}/{endpoint}", params=params, timeout=15)
+            req_params = {**params}
+            if TASO_API_KEY:
+                req_params["api_key"] = TASO_API_KEY
+            r = session.get(f"{BASE_URL}/{endpoint}", params=req_params, timeout=15)
             _last_api_call = time.time()
             r.raise_for_status()
             return r.json()
@@ -282,86 +257,56 @@ def api_get(session: requests.Session, endpoint: str, params: dict,
             return None
 
 
-def parse_cat(cat_id: str) -> tuple[str, str]:
-    if "!" in cat_id:
-        c, comp = cat_id.split("!", 1)
-        return c, comp
-    return cat_id, "etejp26"
-
-
 # ─── Otteluhaku ───────────────────────────────────────────────────────────────
 
 
 def find_todays_venue_matches(session: requests.Session, venue: str,
                                team: str = "", log_fn=None,
                                stop_check=None) -> list[tuple[dict, str, str]]:
-    """Hakee KAIKKI tänään kentällä pelattavat ottelut.
+    """Hakee KAIKKI tänään kentällä pelattavat ottelut yhdellä API-kutsulla.
+    Käyttää venue_id-parametria → 1 kutsu vs. vanhat 33+ kutsua.
     Palauttaa listan: [(match_dict, cat_id, league_name), ...]
-    Jos team annettu, suodattaa myös joukkueen nimen mukaan.
     """
     today = date.today().strftime("%Y-%m-%d")
     if log_fn:
-        filter_str = f"{venue}" + (f" / {team}" if team else "")
+        filter_str = f"{venue} (venue_id={VENUE_ID})"
+        if team:
+            filter_str += f" / {team}"
         log_fn(f"Haetaan otteluita {today} | {filter_str} ...")
 
-    found = []
-    seen_ids = set()
-    league_cache = {}  # (comp, cat) -> league_name
+    data = api_get(session, "getMatches",
+                   {"venue_id": VENUE_ID, "date": today},
+                   log_fn=log_fn)
+    if not data:
+        return []
 
-    for cat_id in CATEGORIES:
+    matches = data if isinstance(data, list) else (
+        data.get("matches") or data.get("data") or data.get("results") or []
+    )
+
+    found = []
+    for m in matches:
         if stop_check and stop_check():
             break
 
-        cat, comp = parse_cat(cat_id)
-        data = api_get(session, "getMatches",
-                       {"competition_id": comp, "category_id": cat},
-                       log_fn=log_fn)
-        if not data:
+        # Joukkuesuodatus (valinnainen)
+        if team and team.lower() not in (
+            (m.get("team_A_name") or "") + " " + (m.get("team_B_name") or "")
+        ).lower():
             continue
 
-        matches = data if isinstance(data, list) else (
-            data.get("matches") or data.get("data") or data.get("results") or []
-        )
+        cat_id = f"{m.get('category_id', '')}!{m.get('competition_id', '')}"
+        league = m.get("category_name") or cat_id
+        found.append((m, cat_id, league))
 
-        for m in matches:
-            mid = str(m.get("match_id", ""))
-            if mid in seen_ids:
-                continue
-
-            if m.get("date") != today:
-                continue
-            if venue.lower() not in (m.get("venue_name") or "").lower():
-                continue
-            if team and team.lower() not in (
-                (m.get("team_A_name") or "") + " " + (m.get("team_B_name") or "")
-            ).lower():
-                continue
-
-            # Hae sarjanimi (cachetetaan per kategoria)
-            cache_key = (comp, cat)
-            if cache_key not in league_cache:
-                cat_info = api_get(session, "getCategory",
-                                   {"competition_id": comp, "category_id": cat},
-                                   log_fn=log_fn)
-                if cat_info and isinstance(cat_info, dict):
-                    league_cache[cache_key] = (
-                        (cat_info.get("category") or {}).get("category_name", cat_id)
-                    )
-                else:
-                    league_cache[cache_key] = cat_id
-
-            league = league_cache[cache_key]
-            seen_ids.add(mid)
-            found.append((m, cat_id, league))
-
-            if log_fn:
-                log_fn(f"  Löytyi: {m.get('team_A_name')} vs {m.get('team_B_name')} | {league}")
+        if log_fn:
+            log_fn(f"  Löytyi: {m.get('team_A_name')} vs {m.get('team_B_name')} | {league}")
 
     # Järjestä alkuajan mukaan
     found.sort(key=lambda x: x[0].get("time", ""))
 
     if log_fn:
-        log_fn(f"Yhteensä {len(found)} ottelua.")
+        log_fn(f"Yhteensä {len(found)} ottelua ({len(matches)} API:sta, {len(found)} suodatuksen jälkeen).")
 
     return found
 

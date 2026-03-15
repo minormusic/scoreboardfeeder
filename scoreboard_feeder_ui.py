@@ -7,23 +7,23 @@ Käynnistä: python scoreboard_feeder_ui.py
 import threading
 import time
 import tkinter as tk
-from datetime import date, datetime
+from datetime import datetime
 
 from feeder_core import (
-    CATEGORIES,
     SCOREBOARD_URL,
     VERSION,
-    api_get,
     connect_db,
-    db_upsert,
+    fetch_live_score,
     find_free_port,
+    find_todays_venue_matches,
     format_score,
     format_status,
+    is_match_active,
     is_port_open,
     make_session,
     needs_ssh_tunnel,
     open_ssh_tunnel,
-    parse_cat,
+    push_venue_matches_to_db,
     update_match_from_live,
 )
 
@@ -103,41 +103,15 @@ class FeederWorker:
                 self.tunnel_proc.terminate()
             return
 
-        # Etsi ottelu
         session = make_session()
 
-        today = date.today().strftime("%Y-%m-%d")
-        self._log(f"Etsitään ottelua {today} | {self.venue} | {self.team}…")
+        # Hae ottelut (1 API-kutsu venue_id:llä)
+        matches_meta = find_todays_venue_matches(
+            session, self.venue, self.team, log_fn=self._log,
+            stop_check=self._stop.is_set,
+        )
 
-        match, league = None, ""
-        for cid in CATEGORIES:
-            if self._stop.is_set():
-                return
-            cat, comp = parse_cat(cid)
-            data = api_get(session, "getMatches",
-                           {"competition_id": comp, "category_id": cat},
-                           log_fn=self._log)
-            if not data:
-                continue
-            ms = (data if isinstance(data, list)
-                  else data.get("matches") or data.get("data") or [])
-            for m in ms:
-                if (m.get("date") == today
-                        and self.venue.lower() in (m.get("venue_name") or "").lower()
-                        and self.team.lower() in (
-                            (m.get("team_A_name") or "")
-                            + " " + (m.get("team_B_name") or "")).lower()):
-                    match = m
-                    cd = api_get(session, "getCategory",
-                                 {"competition_id": comp, "category_id": cat},
-                                 log_fn=self._log)
-                    if cd and isinstance(cd, dict):
-                        league = (cd.get("category") or {}).get("category_name", cid)
-                    break
-            if match:
-                break
-
-        if not match:
+        if not matches_meta:
             self._log("Tänään ei ottelua näillä hakuehdoilla.")
             self.on_status("error")
             self.conn.close()
@@ -145,32 +119,48 @@ class FeederWorker:
                 self.tunnel_proc.terminate()
             return
 
-        home = match.get("team_A_name", "?")
-        away = match.get("team_B_name", "?")
-        self._log(f"Ottelu: {home} vs {away} | {league}")
+        # Kirjoita heti cacheen
+        push_venue_matches_to_db(self.conn, self.venue, matches_meta)
         self.on_status("running")
 
+        # Näytä ensimmäinen ottelu GUI:ssa
+        match, _, league = matches_meta[0]
+        home = match.get("team_A_name", "?")
+        away = match.get("team_B_name", "?")
+        self.on_match(home, format_score(match), away, format_status(match), league)
+
         # Pääsilmukka
-        last_score = None
+        last_discovery = time.time()
+        discovery_interval = 600  # 10 min
+
         while not self._stop.is_set():
-            live = api_get(session, "getMatch",
-                           {"match_id": match.get("match_id")},
-                           log_fn=self._log)
-            if live:
-                if isinstance(live, dict) and "match" in live:
-                    live = live["match"]
-                update_match_from_live(match, live)
+            # Re-discovery vain 10 min välein (ei joka syklillä)
+            if time.time() - last_discovery > discovery_interval:
+                new_meta = find_todays_venue_matches(
+                    session, self.venue, self.team, log_fn=self._log,
+                    stop_check=self._stop.is_set,
+                )
+                if new_meta:
+                    old_by_id = {str(m.get("match_id")): m for m, _, _ in matches_meta}
+                    for m, _, _ in new_meta:
+                        mid = str(m.get("match_id"))
+                        if mid in old_by_id and "status_changed_at" in old_by_id[mid]:
+                            m["status_changed_at"] = old_by_id[mid]["status_changed_at"]
+                    matches_meta = new_meta
+                last_discovery = time.time()
 
-            score  = format_score(match)
-            status = format_status(match)
-            self.on_match(home, score, away, status, league)
-
-            changed = score != last_score
-            last_score = score
-
-            try:
+            # Hae live-tulokset vain aktiivisille otteluille
+            for match, cat_id, league in matches_meta:
+                if not is_match_active(match):
+                    continue
                 match_id = str(match.get("match_id", ""))
-                db_upsert(self.conn, f"match_{match_id}", match, "match_detail", ttl_hours=3)
+                live = fetch_live_score(session, match_id, log_fn=self._log)
+                if live:
+                    update_match_from_live(match, live)
+
+            # Kirjoita cacheen
+            try:
+                push_venue_matches_to_db(self.conn, self.venue, matches_meta)
                 db_ok = "ok"
             except Exception:
                 db_ok = "virhe"
@@ -179,11 +169,27 @@ class FeederWorker:
                 except Exception:
                     pass
 
-            self._log(f"{home} {score} {away}  |  {status}  |  DB {db_ok}"
-                      + ("  *** MUUTOS ***" if changed and score != "- : -" else ""))
+            # Logita ja päivitä GUI (ensimmäinen aktiivinen ottelu)
+            for match, cat_id, league in matches_meta:
+                home = match.get("team_A_name", "?")
+                away = match.get("team_B_name", "?")
+                score = format_score(match)
+                status = format_status(match)
+                self._log(f"{home} {score} {away}  |  {status}  |  DB {db_ok}")
+            # Näytä ensimmäinen live tai ensimmäinen ottelu
+            display = next(
+                ((m, lg) for m, _, lg in matches_meta if is_match_active(m)),
+                (matches_meta[0][0], matches_meta[0][2]),
+            )
+            dm, dl = display
+            self.on_match(
+                dm.get("team_A_name", "?"), format_score(dm),
+                dm.get("team_B_name", "?"), format_status(dm), dl,
+            )
 
-            if (match.get("status") or "").lower() == "played":
-                self._log("Ottelu päättynyt.")
+            # Kaikki pelattu?
+            if all((m.get("status") or "").lower() == "played" for m, _, _ in matches_meta):
+                self._log("Kaikki ottelut päättyneet.")
                 self.on_status("idle")
                 break
 

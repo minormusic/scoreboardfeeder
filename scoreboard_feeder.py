@@ -210,6 +210,8 @@ def main():
                     break
                 log(f"Kaikki pelattu, odotetaan {IDLE_SLEEP}s (re-discovery)...")
                 for _ in range(IDLE_SLEEP):
+                    if _shutdown:
+                        break
                     time.sleep(1)
                 last_discovery = 0  # pakota re-discovery
                 continue

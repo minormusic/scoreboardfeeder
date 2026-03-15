@@ -323,8 +323,31 @@ body {
 </head>
 <body>
 
+<!-- DOM rakennetaan kerran, päivitetään vain muuttuneet kentät -->
 <div class="scoreboard" id="sb">
-    <div class="no-match" id="no-match">Ladataan...</div>
+    <div class="league" id="el-league"></div>
+    <div class="team team-home">
+        <div class="team-col">
+            <div class="team-name" id="el-home-name"></div>
+            <div class="goals" id="el-home-goals"></div>
+        </div>
+        <div class="crest-placeholder" id="el-home-crest"></div>
+    </div>
+    <div class="score-box">
+        <span class="score" id="el-score-a">-</span>
+        <span class="score-separator">:</span>
+        <span class="score" id="el-score-b">-</span>
+    </div>
+    <div class="team team-away">
+        <div class="crest-placeholder" id="el-away-crest"></div>
+        <div class="team-col away">
+            <div class="team-name" id="el-away-name"></div>
+            <div class="goals" id="el-away-goals"></div>
+        </div>
+    </div>
+    <div class="status-box" id="el-status-box">
+        <span class="status-text" id="el-status"></span>
+    </div>
 </div>
 
 <script>
@@ -337,6 +360,10 @@ let clockAnchorMs = 0;
 let clockAnchorSec = 0;
 let lastScoreA = null;
 let lastScoreB = null;
+let lastHomeCrest = null;
+let lastAwayCrest = null;
+
+const $ = id => document.getElementById(id);
 
 async function fetchData() {
     try {
@@ -349,172 +376,121 @@ async function fetchData() {
 }
 
 function render(data) {
-    const sb = document.getElementById('sb');
     const m = data.match;
+    const sb = $('sb');
 
     if (!m) {
-        sb.innerHTML = '<div class="no-match">Ei otteluita</div>';
+        sb.style.opacity = '0.3';
+        $('el-home-name').textContent = '';
+        $('el-away-name').textContent = '';
+        $('el-score-a').textContent = '-';
+        $('el-score-b').textContent = '-';
+        $('el-status').textContent = 'Ei otteluita';
         stopClock();
         return;
     }
+    sb.style.opacity = '1';
 
     // Ottelun vaihto → fade
     const newId = m.match_id;
     if (currentMatchId && currentMatchId !== newId) {
         sb.classList.add('fading');
         setTimeout(() => {
-            renderMatch(m);
+            updateFields(m);
             sb.classList.remove('fading');
         }, 400);
     } else {
-        renderMatch(m);
+        updateFields(m);
     }
     currentMatchId = newId;
 }
 
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s || '';
-    return d.innerHTML;
-}
-
-function makeCrest(url) {
-    if (!url) {
-        const d = document.createElement('div');
-        d.className = 'crest-placeholder';
-        return d;
-    }
-    const img = document.createElement('img');
-    img.className = 'crest';
-    img.src = url;
-    img.onerror = function() { this.className = 'crest-placeholder'; this.removeAttribute('src'); };
-    return img;
-}
-
-function renderMatch(m) {
-    const sb = document.getElementById('sb');
+function updateFields(m) {
     const status = (m.status || '').toLowerCase();
     const isLive = status === 'live' || status === 'playing';
     const isPlayed = status === 'played';
 
+    // Joukkueet & sarja (textContent = XSS-turvallinen)
+    $('el-league').textContent = m.league_name || '';
+    $('el-home-name').textContent = m.team_A_name || '';
+    $('el-away-name').textContent = m.team_B_name || '';
+    $('el-home-goals').textContent = formatGoals(m.goals || [], m.team_A_id);
+    $('el-away-goals').textContent = formatGoals(m.goals || [], m.team_B_id);
+
+    // Tulokset
     const scoreA = m.fs_A != null ? m.fs_A : '-';
     const scoreB = m.fs_B != null ? m.fs_B : '-';
-
-    // Score flash
     const flashA = lastScoreA !== null && scoreA !== lastScoreA;
     const flashB = lastScoreB !== null && scoreB !== lastScoreB;
     lastScoreA = scoreA;
     lastScoreB = scoreB;
 
-    // Maalit (escapettu)
-    const goalsA = esc(formatGoals(m.goals || [], m.team_A_id));
-    const goalsB = esc(formatGoals(m.goals || [], m.team_B_id));
+    const elA = $('el-score-a');
+    const elB = $('el-score-b');
+    elA.textContent = scoreA;
+    elB.textContent = scoreB;
 
-    // Status teksti
-    let statusText;
+    if (flashA) { elA.classList.add('flash'); setTimeout(() => elA.classList.remove('flash'), 500); }
+    if (flashB) { elB.classList.add('flash'); setTimeout(() => elB.classList.remove('flash'), 500); }
+
+    // Logot (päivitä vain jos URL muuttui)
+    updateCrest('el-home-crest', m.club_A_crest, 'home');
+    updateCrest('el-away-crest', m.club_B_crest, 'away');
+
+    // Status
+    const statusBox = $('el-status-box');
     if (isLive) {
-        statusText = null; // kello asetetaan erikseen
-    } else if (isPlayed) {
-        statusText = 'LOPPU';
-    } else {
-        const t = (m.time || '').substring(0, 5);
-        statusText = t || 'TULOSSA';
-    }
-
-    // Rakennetaan DOM turvallisesti (ei innerHTML datalle)
-    sb.innerHTML = '';
-
-    // League
-    const leagueEl = document.createElement('div');
-    leagueEl.className = 'league';
-    leagueEl.textContent = m.league_name || '';
-    sb.appendChild(leagueEl);
-
-    // Home team
-    const homeTeam = document.createElement('div');
-    homeTeam.className = 'team team-home';
-    const homeCol = document.createElement('div');
-    homeCol.className = 'team-col';
-    const homeName = document.createElement('div');
-    homeName.className = 'team-name';
-    homeName.textContent = m.team_A_name || '';
-    const homeGoals = document.createElement('div');
-    homeGoals.className = 'goals';
-    homeGoals.textContent = formatGoals(m.goals || [], m.team_A_id);
-    homeCol.appendChild(homeName);
-    homeCol.appendChild(homeGoals);
-    homeTeam.appendChild(homeCol);
-    homeTeam.appendChild(makeCrest(m.club_A_crest));
-    sb.appendChild(homeTeam);
-
-    // Score box
-    const scoreBox = document.createElement('div');
-    scoreBox.className = 'score-box';
-    const scoreAEl = document.createElement('span');
-    scoreAEl.className = 'score' + (flashA ? ' flash' : '');
-    scoreAEl.id = 'score-a';
-    scoreAEl.textContent = scoreA;
-    const sep = document.createElement('span');
-    sep.className = 'score-separator';
-    sep.textContent = ':';
-    const scoreBEl = document.createElement('span');
-    scoreBEl.className = 'score' + (flashB ? ' flash' : '');
-    scoreBEl.id = 'score-b';
-    scoreBEl.textContent = scoreB;
-    scoreBox.appendChild(scoreAEl);
-    scoreBox.appendChild(sep);
-    scoreBox.appendChild(scoreBEl);
-    sb.appendChild(scoreBox);
-
-    // Away team
-    const awayTeam = document.createElement('div');
-    awayTeam.className = 'team team-away';
-    awayTeam.appendChild(makeCrest(m.club_B_crest));
-    const awayCol = document.createElement('div');
-    awayCol.className = 'team-col away';
-    const awayName = document.createElement('div');
-    awayName.className = 'team-name';
-    awayName.textContent = m.team_B_name || '';
-    const awayGoals = document.createElement('div');
-    awayGoals.className = 'goals';
-    awayGoals.textContent = formatGoals(m.goals || [], m.team_B_id);
-    awayCol.appendChild(awayName);
-    awayCol.appendChild(awayGoals);
-    awayTeam.appendChild(awayCol);
-    sb.appendChild(awayTeam);
-
-    // Status box
-    const statusBox = document.createElement('div');
-    statusBox.className = 'status-box';
-    if (isLive) {
-        const dot = document.createElement('div');
-        dot.className = 'live-dot';
-        statusBox.appendChild(dot);
-        const clock = document.createElement('span');
-        clock.className = 'status-text';
-        clock.id = 'clock';
-        statusBox.appendChild(clock);
-    } else {
-        const st = document.createElement('span');
-        st.className = 'status-text';
-        st.textContent = statusText;
-        statusBox.appendChild(st);
-    }
-    sb.appendChild(statusBox);
-
-    // Flash-efekti poisto
-    if (flashA || flashB) {
-        setTimeout(() => {
-            document.querySelectorAll('.score.flash').forEach(el =>
-                el.classList.remove('flash'));
-        }, 500);
-    }
-
-    // Kello
-    if (isLive) {
+        // Tarvitaanko live-dot?
+        if (!statusBox.querySelector('.live-dot')) {
+            statusBox.innerHTML = '';
+            const dot = document.createElement('div');
+            dot.className = 'live-dot';
+            statusBox.appendChild(dot);
+            const clock = document.createElement('span');
+            clock.className = 'status-text';
+            clock.id = 'el-status';
+            statusBox.appendChild(clock);
+        }
         startClock(m);
     } else {
+        // Poista live-dot jos oli
+        if (statusBox.querySelector('.live-dot')) {
+            statusBox.innerHTML = '';
+            const st = document.createElement('span');
+            st.className = 'status-text';
+            st.id = 'el-status';
+            statusBox.appendChild(st);
+        }
         stopClock();
+        if (isPlayed) {
+            $('el-status').textContent = 'LOPPU';
+        } else {
+            const t = (m.time || '').substring(0, 5);
+            $('el-status').textContent = t || 'TULOSSA';
+        }
+    }
+}
+
+function updateCrest(elId, url, side) {
+    const cache = side === 'home' ? 'lastHomeCrest' : 'lastAwayCrest';
+    const current = side === 'home' ? lastHomeCrest : lastAwayCrest;
+    if (url === current) return;
+    if (side === 'home') lastHomeCrest = url; else lastAwayCrest = url;
+
+    const parent = $(elId).parentNode;
+    const old = $(elId);
+    if (url) {
+        const img = document.createElement('img');
+        img.className = 'crest';
+        img.id = elId;
+        img.src = url;
+        img.onerror = function() { this.className = 'crest-placeholder'; this.removeAttribute('src'); };
+        parent.replaceChild(img, old);
+    } else {
+        const div = document.createElement('div');
+        div.className = 'crest-placeholder';
+        div.id = elId;
+        parent.replaceChild(div, old);
     }
 }
 
@@ -524,7 +500,7 @@ function formatGoals(goals, teamId) {
         .filter(g => String(g.team_id) === String(teamId))
         .map(g => {
             const name = (g.player_name || '').split(' ').pop();
-            return `${name} ${g.time_min}'`;
+            return name + ' ' + g.time_min + "'";
         })
         .join(', ');
 }
@@ -537,16 +513,13 @@ function parseMmss(mmss) {
 
 function startClock(m) {
     stopClock();
-
     const period = m.live_period;
     const timerOn = m.live_timer_on;
     const mmss = m.live_time_mmss;
     const periodMin = m.period_min || 45;
 
     if (period === -1) {
-        // Puoliaika
-        const el = document.getElementById('clock');
-        if (el) el.textContent = 'HT';
+        $('el-status').textContent = 'HT';
         return;
     }
 
@@ -555,22 +528,16 @@ function startClock(m) {
     if (timerOn && mmss) {
         clockAnchorMs = Date.now();
         clockAnchorSec = parseMmss(mmss);
-
-        clockInterval = setInterval(() => {
+        const show = () => {
             const elapsed = (Date.now() - clockAnchorMs) / 1000;
-            const totalSec = baseSec + clockAnchorSec + elapsed;
-            const displayMin = Math.floor(totalSec / 60) + 1;
-            const el = document.getElementById('clock');
+            const displayMin = Math.floor((baseSec + clockAnchorSec + elapsed) / 60) + 1;
+            const el = $('el-status');
             if (el) el.textContent = displayMin + "'";
-        }, 1000);
-
-        // Näytä heti
-        const displayMin = Math.floor((baseSec + clockAnchorSec) / 60) + 1;
-        const el = document.getElementById('clock');
-        if (el) el.textContent = displayMin + "'";
+        };
+        show();
+        clockInterval = setInterval(show, 1000);
     } else {
-        const el = document.getElementById('clock');
-        if (el) el.textContent = 'LIVE';
+        $('el-status').textContent = 'LIVE';
     }
 }
 
@@ -581,7 +548,6 @@ function stopClock() {
     }
 }
 
-// Käynnistä
 fetchData();
 setInterval(fetchData, POLL_INTERVAL);
 </script>
