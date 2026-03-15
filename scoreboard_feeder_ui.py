@@ -52,11 +52,15 @@ class FeederWorker:
     def stop(self):
         self._stop.set()
         if self.tunnel_proc:
-            try: self.tunnel_proc.terminate()
-            except Exception: pass
+            try:
+                self.tunnel_proc.terminate()
+            except Exception:
+                pass
         if self.conn:
-            try: self.conn.close()
-            except Exception: pass
+            try:
+                self.conn.close()
+            except Exception:
+                pass
         self.on_status("idle")
         self.on_match("—", "- : -", "—", "", "")
 
@@ -105,7 +109,7 @@ class FeederWorker:
         today = date.today().strftime("%Y-%m-%d")
         self._log(f"Etsitään ottelua {today} | {self.venue} | {self.team}…")
 
-        match, cat_id, league = None, "", ""
+        match, league = None, ""
         for cid in CATEGORIES:
             if self._stop.is_set():
                 return
@@ -124,7 +128,6 @@ class FeederWorker:
                             (m.get("team_A_name") or "")
                             + " " + (m.get("team_B_name") or "")).lower()):
                     match = m
-                    cat_id = cid
                     cd = api_get(session, "getCategory",
                                  {"competition_id": comp, "category_id": cat},
                                  log_fn=self._log)
@@ -171,8 +174,10 @@ class FeederWorker:
                 db_ok = "ok"
             except Exception:
                 db_ok = "virhe"
-                try: self.conn.ping(reconnect=True)
-                except Exception: pass
+                try:
+                    self.conn.ping(reconnect=True)
+                except Exception:
+                    pass
 
             self._log(f"{home} {score} {away}  |  {status}  |  DB {db_ok}"
                       + ("  *** MUUTOS ***" if changed and score != "- : -" else ""))
