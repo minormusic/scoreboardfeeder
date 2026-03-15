@@ -47,7 +47,7 @@ BASE_URL = "https://spl.torneopal.net/taso/rest"
 
 def _build_api_headers() -> dict:
     return {
-        "Accept": f"json/{TASO_API_KEY}" if TASO_API_KEY else "application/json",
+        "Accept": "application/json",
         "Accept-Encoding": "gzip, deflate, br",
         "Accept-Language": "en-US,en;q=0.9,fi;q=0.8",
         "Cache-Control": "no-cache",
