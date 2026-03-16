@@ -42,7 +42,9 @@ SSH_PORT = 22
 
 # ─── API-asetukset ───────────────────────────────────────────────────────────
 
-BASE_URL = "https://spl.torneopal.net/taso/rest"
+BASE_URL = os.environ.get(
+    "TASO_BASE_URL", "https://taso-proxy.santtusipila.workers.dev"
+)
 
 
 def _build_api_headers() -> dict:
